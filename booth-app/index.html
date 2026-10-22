@@ -75,6 +75,8 @@ button { cursor: pointer; }
   font-size: 11px; font-weight: 700;
 }
 .crew span.live { background: var(--red-solid); color: var(--on-red); }
+.crew img { width: 30px; height: 30px; margin-left: -6px; border: 2px solid var(--bg); display: block; object-fit: cover; box-shadow: var(--shadow); }
+.crew img.me { border-color: var(--red); }
 
 .example {
   margin-top: 12px; padding: 8px 12px; font-size: 13px; color: var(--fg-subtle);
@@ -188,6 +190,8 @@ textarea { min-height: 96px; resize: vertical; }
 .note p { margin: 0; }
 .actions { display: grid; gap: 8px; }
 .soon { font-size: 12px; color: var(--fg-subtle); text-align: center; }
+.danger { background: none; border: 0; color: var(--fg-subtle); font-size: 13px; text-decoration: underline; padding: 8px; justify-self: center; }
+.danger.armed { color: var(--red-solid); font-weight: 700; }
 
 .toast {
   position: fixed; left: 50%; transform: translateX(-50%); z-index: 20;
@@ -206,16 +210,12 @@ textarea { min-height: 96px; resize: vertical; }
       <h1>Booth Leads</h1>
       <div class="sub">Day 1 · Booth crew</div>
     </div>
-    <div class="crew" aria-label="Crew on the floor now: you, Jess, and Marco">
-      <span class="live" title="You">YOU</span>
-      <span title="Jess">JR</span>
-      <span title="Marco">MD</span>
-    </div>
+    <div class="crew" id="crew" aria-label="Crew on the floor now"></div>
   </div>
 </header>
 
 <main class="wrap">
-  <p class="example">Concept preview with example leads. The live app starts empty and saves leads for the whole crew.</p>
+  <p class="example" id="notice" hidden></p>
 
   <div class="tally" id="tally" role="group" aria-label="Filter by rating"></div>
 
@@ -311,26 +311,44 @@ const TAGS = [
   "Wants a demo", "Has a project now", "Decision maker", "Uses Salesforce",
   "Agentforce curious", "Mentioned a competitor", "Call after budget season", "Swag only",
 ];
+const FIELDS = ["name", "title", "company", "email", "phone", "social"];
+const READ_PROMPT = `This photo shows a conference name badge or a business card.
+Read the printed text and reply with only this JSON object:
+{"name": "", "title": "", "company": "", "email": "", "phone": "", "social": ""}
+Rules: use "" for anything not printed. "social" is a LinkedIn URL or a social handle, only if printed. Do not guess or invent values. The photo can be blurry or sideways.`;
 
-// Example leads for the concept. The live app reads these from the shared database instead.
-const leads = [
-  { id: 1, name: "Dana Whitfield", title: "VP Revenue Operations", company: "Northwind Freight", email: "dana.whitfield@example.com", phone: "(555) 014-2290", social: "linkedin.com/in/example-dana", rating: "hot", tags: ["Wants a demo", "Decision maker", "Uses Salesforce"], notes: "Forecasts live in spreadsheets. Wants a demo next week, Tuesday or Wednesday.", by: "Jess", at: "10:42 AM" },
-  { id: 2, name: "Priya Raman", title: "Salesforce Admin", company: "Lakeside Health", email: "priya.raman@example.com", phone: "", social: "", rating: "warm", tags: ["Agentforce curious", "Uses Salesforce"], notes: "Team of two admins. Curious about agents for intake, needs a business case first.", by: "You", at: "10:18 AM" },
-  { id: 3, name: "Marcus Bell", title: "Director of IT", company: "Crestline Builders", email: "mbell@example.com", phone: "(555) 018-7731", social: "", rating: "nurture", tags: ["Call after budget season"], notes: "Call me after budget season. Planning closes in January.", by: "Marco", at: "9:55 AM" },
-  { id: 4, name: "Alex Kim", title: "Student", company: "State University", email: "", phone: "", social: "", rating: "cold", tags: ["Swag only"], notes: "", by: "You", at: "9:31 AM" },
-  { id: 5, name: "Hannah Ortiz", title: "COO", company: "Brightpath Credit Union", email: "hortiz@example.com", phone: "", social: "linkedin.com/in/example-hannah", rating: "hot", tags: ["Has a project now", "Mentioned a competitor"], notes: "Unhappy with current partner. RFP goes out in three weeks.", by: "Jess", at: "9:12 AM" },
-];
-
-// Example result for the concept. The live app asks Claude to read the photo.
-const EXAMPLE_PARSE = { name: "Sam Okafor", title: "Head of Sales Ops", company: "Granite Peak Software", email: "sam.okafor@example.com", phone: "(555) 012-4408" };
-
+let db = null, user = null, sample = null, room = null;
+let myId = null;
+let leads = [];
+let loaded = false;
+let canWrite = true;
+let names = {};
 let filter = null;
 let draft = null;
-let openId = null;
+let readCtl = null;
+let saving = false;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ratingLabel = (id) => RATINGS.find((r) => r.id === id)?.label ?? "Unrated";
+const str = (v) => (typeof v === "string" ? v.trim() : "");
 
+function whoName(id) {
+  if (!id) return "Someone";
+  if (id === myId) return "You";
+  return names[id]?.name || "Someone";
+}
+function when(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const t = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? t : `${d.toLocaleDateString([], { weekday: "short" })} ${t}`;
+}
+function notice(msg) {
+  $("notice").textContent = msg || "";
+  $("notice").hidden = !msg;
+}
+
+// Rendering
 function renderTally() {
   $("tally").innerHTML = RATINGS.map((r) => {
     const n = leads.filter((l) => l.rating === r.id).length;
@@ -342,30 +360,76 @@ function renderList() {
   const shown = filter ? leads.filter((l) => l.rating === filter) : leads;
   $("listTitle").textContent = filter ? `${ratingLabel(filter)} leads` : `All leads · ${leads.length}`;
   $("clearFilter").hidden = !filter;
+  if (!loaded) {
+    $("leads").innerHTML = `<li class="empty">Loading leads…</li>`;
+    return;
+  }
   $("leads").innerHTML = shown.length ? shown.map((l) => `
-    <li><button class="lead" data-id="${l.id}">
+    <li><button class="lead" data-id="${esc(l.id)}">
       <div class="who"><div class="name">${esc(l.name || "No name yet")}</div><div class="co">${esc([l.title, l.company].filter(Boolean).join(" · "))}</div></div>
-      ${l.rating ? `<span class="pill ${l.rating}">${ratingLabel(l.rating)}</span>` : ""}
-      <div class="meta">${l.tags.slice(0, 2).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}${l.tags.length > 2 ? `<span>+${l.tags.length - 2}</span>` : ""}<span>Added by ${esc(l.by)} · ${esc(l.at)}</span></div>
+      ${l.rating ? `<span class="pill ${esc(l.rating)}">${ratingLabel(l.rating)}</span>` : ""}
+      <div class="meta">${l.tags.slice(0, 2).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}${l.tags.length > 2 ? `<span>+${l.tags.length - 2}</span>` : ""}<span>Added by ${esc(whoName(l.addedBy))} · ${esc(when(l.createdAt))}</span></div>
     </button></li>`).join("")
-    : `<li class="empty">No ${filter ? ratingLabel(filter).toLowerCase() + " " : ""}leads yet. Tap Scan to add the first one.</li>`;
+    : `<li class="empty">${filter ? `No ${ratingLabel(filter).toLowerCase()} leads yet.` : "No leads yet. Tap Scan to add the first one."}</li>`;
 }
 
-function render() { renderTally(); renderList(); }
+async function render() {
+  if (user) {
+    const ids = [...new Set(leads.map((l) => l.addedBy).filter(Boolean))];
+    if (ids.length) names = { ...names, ...(await user.profiles(ids)) };
+  }
+  renderTally();
+  renderList();
+}
 
-function show(view) {
-  for (const v of ["capture", "detail"]) $(v).hidden = v !== view;
-  document.body.style.overflow = view ? "hidden" : "";
+function normalize(snap) {
+  const d = snap.data() || {};
+  return {
+    id: snap.id,
+    name: str(d.name), title: str(d.title), company: str(d.company),
+    email: str(d.email), phone: str(d.phone), social: str(d.social),
+    rating: RATINGS.some((r) => r.id === d.rating) ? d.rating : null,
+    tags: Array.isArray(d.tags) ? d.tags.filter((t) => typeof t === "string") : [],
+    notes: str(d.notes),
+    addedBy: typeof d.addedBy === "string" ? d.addedBy : null,
+    createdAt: typeof d.createdAt === "number" ? d.createdAt : 0,
+  };
+}
+
+// Crew on the floor
+async function renderCrew(peers) {
+  const box = $("crew");
+  const ids = [];
+  for (const p of peers) if (p.kind === "viewer" && p.by && !ids.includes(p.by)) ids.push(p.by);
+  if (myId) { ids.splice(ids.indexOf(myId), ids.includes(myId) ? 1 : 0); ids.unshift(myId); }
+  const ps = user && ids.length ? await user.profiles(ids) : {};
+  box.replaceChildren();
+  for (const id of ids.slice(0, 5)) {
+    const img = document.createElement("img");
+    img.src = ps[id]?.avatarUrl || "";
+    img.alt = id === myId ? "You" : ps[id]?.name || "Crew member";
+    img.title = img.alt;
+    if (id === myId) img.className = "me";
+    box.append(img);
+  }
+  if (ids.length > 5) {
+    const more = document.createElement("span");
+    more.textContent = `+${ids.length - 5}`;
+    box.append(more);
+  }
+  box.setAttribute("aria-label", `Crew on the floor now: ${ids.length}`);
 }
 
 // Capture
 function openCapture() {
+  readCtl?.abort();
   draft = { rating: null, tags: new Set() };
   $("capForm").reset();
   $("photoBox").querySelector("img")?.remove();
   $("photoIcon").hidden = false;
-  $("photoText").textContent = "Take a photo of the badge or card";
-  $("photoHint").textContent = "Claude reads the name, title, company, and contact details.";
+  $("photoText").textContent = sample ? "Take a photo of the badge or card" : "Type the details below";
+  $("photoHint").textContent = sample ? "Claude reads the name, title, company, and contact details." : "Photo reading is not available in this view.";
+  $("photoBox").hidden = !sample;
   $("readStatus").hidden = true;
   renderCaptureControls();
   show("capture");
@@ -377,9 +441,21 @@ function renderCaptureControls() {
   $("capTags").innerHTML = TAGS.map((t) => `<button type="button" class="chip" data-tag="${esc(t)}" aria-pressed="${draft.tags.has(t)}">${esc(t)}</button>`).join("");
 }
 
-$("photoInput").addEventListener("change", (e) => {
+function readError(code) {
+  switch (code) {
+    case "not_granted": case "sampling_disabled": case "not_declared": case "images_unavailable":
+    case "capability_disabled": case "capability_removed":
+      return "Claude cannot read photos in this view. Type the details instead.";
+    case "rate_limited": return "Too many reads right now. Wait a moment, then retake the photo.";
+    case "image_rejected": return "Claude could not use that photo. Try another one.";
+    case "session_expired": return "Sign in to Claude again, then retake the photo.";
+    default: return "Could not read the badge. Retake the photo or type the details.";
+  }
+}
+
+$("photoInput").addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
-  if (!file) return;
+  if (!file || !sample) return;
   const img = document.createElement("img");
   img.alt = "Badge photo";
   img.src = URL.createObjectURL(file);
@@ -390,11 +466,25 @@ $("photoInput").addEventListener("change", (e) => {
   $("photoHint").textContent = "";
   const st = $("readStatus");
   st.hidden = false;
-  st.innerHTML = `<span class="material-icons spin">autorenew</span>Reading the badge…`;
-  setTimeout(() => {
-    for (const [k, v] of Object.entries(EXAMPLE_PARSE)) $("f-" + k).value = v;
-    st.innerHTML = `<span class="material-icons">info</span>Example result. In the live app, Claude fills these from your photo. Check them before you save.`;
-  }, 900);
+  st.innerHTML = `<span class="material-icons spin">autorenew</span>Claude is reading the badge…`;
+  readCtl?.abort();
+  const ctl = (readCtl = new AbortController());
+  try {
+    const out = await sample.json(READ_PROMPT, { images: file, modelTier: "quick", signal: ctl.signal });
+    if (ctl.signal.aborted) return;
+    const got = out && typeof out === "object" ? out : {};
+    let filled = 0;
+    for (const k of FIELDS) {
+      const v = str(got[k]);
+      if (v) { $("f-" + k).value = v; filled++; }
+    }
+    st.innerHTML = filled
+      ? `<span class="material-icons">check_circle</span>Read ${filled} field${filled === 1 ? "" : "s"}. Check them before you save.`
+      : `<span class="material-icons">info</span>No text found. Retake the photo or type the details.`;
+  } catch (err) {
+    if (err?.code === "cancelled") return;
+    st.innerHTML = `<span class="material-icons">error_outline</span>${esc(readError(err?.code))}`;
+  }
 });
 
 $("capRating").addEventListener("click", (e) => {
@@ -411,34 +501,53 @@ $("capTags").addEventListener("click", (e) => {
   b.setAttribute("aria-pressed", draft.tags.has(t));
 });
 
-$("capForm").addEventListener("submit", (e) => {
+$("capForm").addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (saving) return;
   const v = (k) => $("f-" + k).value.trim();
   if (!v("name") && !v("company") && !v("email")) {
     toast("Add a name, company, or email first.");
     return;
   }
-  const now = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  leads.unshift({
-    id: Date.now(), name: v("name"), title: v("title"), company: v("company"), email: v("email"),
-    phone: v("phone"), social: v("social"), rating: draft.rating, tags: [...draft.tags],
-    notes: v("notes"), by: "You", at: now,
-  });
-  filter = null;
-  show(null);
-  render();
-  toast("Lead saved");
+  if (!db || !canWrite) {
+    toast("This view cannot save leads.");
+    return;
+  }
+  const btn = e.submitter || $("capForm").querySelector("[type=submit]");
+  saving = true;
+  btn.disabled = true;
+  try {
+    const lead = { rating: draft.rating, tags: [...draft.tags], notes: v("notes"), addedBy: myId, createdAt: Date.now() };
+    for (const k of FIELDS) lead[k] = v(k);
+    await db.collection("leads").add(lead);
+    readCtl?.abort();
+    filter = null;
+    show(null);
+    toast("Lead saved");
+  } catch (err) {
+    if (err?.code === "invalid_argument") {
+      canWrite = false;
+      notice("You can see the crew's leads, but your access does not let you add them.");
+      toast("You cannot add leads with your access.");
+    } else if (err?.code === "quota_exceeded") {
+      toast("The lead list is full. Delete old test leads first.");
+    } else {
+      toast("Could not save. Check your connection and tap Save again.");
+    }
+  } finally {
+    saving = false;
+    btn.disabled = false;
+  }
 });
 
 // Detail
 function openDetail(id) {
   const l = leads.find((x) => x.id === id);
   if (!l) return;
-  openId = id;
   const rows = [["Email", l.email], ["Phone", l.phone], ["Socials", l.social]].filter(([, val]) => val);
   $("detailBody").innerHTML = `
     <div class="detail-head">
-      ${l.rating ? `<span class="pill ${l.rating}" style="justify-self:start">${ratingLabel(l.rating)}</span>` : ""}
+      ${l.rating ? `<span class="pill ${esc(l.rating)}" style="justify-self:start">${ratingLabel(l.rating)}</span>` : ""}
       <h3>${esc(l.name || "No name yet")}</h3>
       <div>${esc([l.title, l.company].filter(Boolean).join(" · "))}</div>
       <hr class="rule">
@@ -446,14 +555,39 @@ function openDetail(id) {
     ${rows.length ? `<dl class="kv">${rows.map(([k, val]) => `<dt>${k}</dt><dd>${esc(val)}</dd>`).join("")}</dl>` : ""}
     ${l.tags.length ? `<div><div class="section-label">Quick tags</div><div class="chips">${l.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div></div>` : ""}
     <div><div class="section-label">Notes</div><div class="note"><p>${l.notes ? esc(l.notes) : "No notes yet."}</p></div></div>
-    <div class="hint">Added by ${esc(l.by)} at ${esc(l.at)}</div>
+    <div class="hint">Added by ${esc(whoName(l.addedBy))} at ${esc(when(l.createdAt))}</div>
     <div class="actions">
       <button class="btn ghost block" disabled><span class="material-icons">travel_explore</span>Research ${esc(l.company || "company")}</button>
       <button class="btn ghost block" disabled><span class="material-icons">send</span>Post to Slack</button>
       <div class="soon">These connect when we add the MCP server.</div>
+      ${db && canWrite ? `<button class="danger" id="delBtn" data-id="${esc(l.id)}">Delete lead</button>` : ""}
     </div>`;
   show("detail");
   $("detail").scrollTop = 0;
+}
+
+$("detailBody").addEventListener("click", async (e) => {
+  const b = e.target.closest("#delBtn");
+  if (!b) return;
+  if (!b.classList.contains("armed")) {
+    b.classList.add("armed");
+    b.textContent = "Tap again to delete for the whole crew";
+    return;
+  }
+  b.disabled = true;
+  try {
+    await db.doc("leads/" + b.dataset.id).delete();
+    show(null);
+    toast("Lead deleted");
+  } catch {
+    b.disabled = false;
+    toast("Could not delete. Try again.");
+  }
+});
+
+function show(view) {
+  for (const v of ["capture", "detail"]) $(v).hidden = v !== view;
+  document.body.style.overflow = view ? "hidden" : "";
 }
 
 let toastTimer;
@@ -462,7 +596,7 @@ function toast(msg) {
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 2200);
+  toastTimer = setTimeout(() => (t.hidden = true), 2400);
 }
 
 $("tally").addEventListener("click", (e) => {
@@ -474,10 +608,45 @@ $("tally").addEventListener("click", (e) => {
 $("clearFilter").addEventListener("click", () => { filter = null; render(); });
 $("leads").addEventListener("click", (e) => {
   const b = e.target.closest("[data-id]");
-  if (b) openDetail(Number(b.dataset.id));
+  if (b) openDetail(b.dataset.id);
 });
 $("scanBtn").addEventListener("click", openCapture);
-document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => show(null)));
+document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => { readCtl?.abort(); show(null); }));
 
+// Start up: render at once, then light up each capability as it arrives.
 render();
+(async () => {
+  const use = (n) => (window.claude?.use ? window.claude.use(n).catch(() => null) : Promise.resolve(null));
+  [db, user, sample, room] = await Promise.all([use("db"), use("user"), use("sample"), use("room")]);
+
+  if (sample) {
+    const lim = await sample.limits().catch(() => null);
+    if (!lim?.images) sample = null;
+  }
+  if (user) {
+    myId = await user.id();
+    if ((await user.can("data.write")) === false) canWrite = false;
+  }
+
+  if (!db) {
+    loaded = true;
+    notice("Open this page in Claude while signed in to see and save the crew's leads.");
+    $("scanBtn").disabled = true;
+    render();
+  } else {
+    if (!canWrite) notice("You can see the crew's leads, but your access does not let you add them.");
+    $("scanBtn").disabled = !canWrite;
+    db.collection("leads").orderBy("createdAt", "desc").limit(1000).onSnapshot(
+      (snap) => { leads = snap.docs.map(normalize); loaded = true; render(); },
+      () => { loaded = true; notice("Lost the connection to the lead list. Reload the page."); render(); },
+    );
+  }
+
+  if (room) {
+    room.presence({ at: "booth" }).catch(() => {});
+    room.onPeers((c) => renderCrew(c.peers), () => renderCrew([]));
+  } else if (myId) {
+    renderCrew([]);
+  }
+})();
 </script>
