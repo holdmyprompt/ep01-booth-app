@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -5,8 +6,19 @@ import { z } from "zod";
 import { researchCompany } from "./research.js";
 
 const PORT = Number(process.env.PORT) || 3000;
-// Optional secret path segment, so the public URL alone cannot spend our API credits.
-const PATH_TOKEN = process.env.MCP_PATH_TOKEN || "";
+// Shared secret, sent by the connector as "Authorization: Bearer <token>", so the public URL alone cannot spend our API credits.
+const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || process.env.MCP_PATH_TOKEN || "";
+// Legacy secret path, kept while connectors move to the header. Unset MCP_PATH_TOKEN to turn it off.
+const LEGACY_PATH_TOKEN = process.env.MCP_PATH_TOKEN || "";
+
+function authorized(req: express.Request): boolean {
+  if (!AUTH_TOKEN) return true;
+  const match = /^Bearer\s+(.+)$/i.exec(req.get("authorization") || "");
+  if (!match) return false;
+  const given = Buffer.from(match[1].trim());
+  const expected = Buffer.from(AUTH_TOKEN);
+  return given.length === expected.length && timingSafeEqual(given, expected);
+}
 // Simple spend guard: at most this many research calls per hour across everyone.
 const MAX_CALLS_PER_HOUR = Number(process.env.MAX_CALLS_PER_HOUR) || 60;
 
@@ -59,8 +71,7 @@ app.get("/healthz", (_req, res) => {
 });
 
 // Stateless Streamable HTTP: a fresh server and transport per request.
-const mcpPath = PATH_TOKEN ? `/mcp/${PATH_TOKEN}` : "/mcp";
-app.post(mcpPath, async (req, res) => {
+async function handleMcp(req: express.Request, res: express.Response) {
   const server = buildServer();
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => {
@@ -76,13 +87,24 @@ app.post(mcpPath, async (req, res) => {
       res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
     }
   }
+}
+
+app.post("/mcp", (req, res) => {
+  if (!authorized(req)) {
+    res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized." }, id: null });
+    return;
+  }
+  return handleMcp(req, res);
 });
+if (LEGACY_PATH_TOKEN) app.post(`/mcp/${LEGACY_PATH_TOKEN}`, handleMcp);
 
 // Stateless mode has no server-sent stream or session to end.
-app.all(mcpPath, (_req, res) => {
+app.all(/^\/mcp(\/.*)?$/, (_req, res) => {
   res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null });
 });
 
 app.listen(PORT, () => {
-  console.log(`MCP server listening on port ${PORT}${PATH_TOKEN ? " (secret path on)" : " at /mcp"}`);
+  console.log(
+    `MCP server listening on port ${PORT} at /mcp (${AUTH_TOKEN ? "bearer auth on" : "no auth"}${LEGACY_PATH_TOKEN ? ", legacy secret path on" : ""})`,
+  );
 });
