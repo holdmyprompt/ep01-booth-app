@@ -40,7 +40,7 @@ Set these on the Render service, never in git.
 | `MCP_AUTH_TOKEN` | Yes | Shared secret. Without it, anyone with the URL can run research. |
 | `MAX_CALLS_PER_HOUR` | No | Research call limit for everyone together. Default 60. |
 
-If you change a variable on Render, make sure that the service redeploys. The startup log line says `x-api-key auth on` when the token is loaded.
+If you change a variable on Render, make sure that the service redeploys. When the token is loaded, the startup log line says `x-api-key auth on`.
 
 ## Connect the research tool to Claude
 
