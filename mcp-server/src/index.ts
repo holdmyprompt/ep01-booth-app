@@ -6,7 +6,7 @@ import { z } from "zod";
 import { researchCompany } from "./research.js";
 
 const PORT = Number(process.env.PORT) || 3000;
-// Shared secret, sent by the connector as "Authorization: Bearer <token>", so the public URL alone cannot spend our API credits.
+// Shared secret, sent by the connector in the "x-api-key" header, so the public URL alone cannot spend our API credits.
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || process.env.MCP_PATH_TOKEN || "";
 // Legacy secret path, kept while connectors move to the header. Unset MCP_PATH_TOKEN to turn it off.
 const LEGACY_PATH_TOKEN = process.env.MCP_PATH_TOKEN || "";
@@ -19,8 +19,7 @@ function sameSecret(a: string, b: string): boolean {
 
 function authorized(req: express.Request): boolean {
   if (!AUTH_TOKEN) return true;
-  const match = /^Bearer\s+(.+)$/i.exec(req.get("authorization") || "");
-  return !!match && sameSecret(match[1].trim(), AUTH_TOKEN);
+  return sameSecret((req.get("x-api-key") || "").trim(), AUTH_TOKEN);
 }
 // Simple spend guard: at most this many research calls per hour across everyone.
 const MAX_CALLS_PER_HOUR = Number(process.env.MAX_CALLS_PER_HOUR) || 60;
@@ -121,6 +120,6 @@ app.all(/^\/mcp(\/.*)?$/, (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(
-    `MCP server listening on port ${PORT} at /mcp (${AUTH_TOKEN ? "bearer auth on" : "no auth"}${LEGACY_PATH_TOKEN ? ", legacy secret path on" : ""})`,
+    `MCP server listening on port ${PORT} at /mcp (${AUTH_TOKEN ? "x-api-key auth on" : "NO AUTH"}${LEGACY_PATH_TOKEN ? ", legacy secret path on" : ""})`,
   );
 });
