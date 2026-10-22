@@ -190,8 +190,6 @@ textarea { min-height: 96px; resize: vertical; }
 .note p { margin: 0; }
 .actions { display: grid; gap: 8px; }
 .soon { font-size: 12px; color: var(--fg-subtle); text-align: center; }
-.danger { background: none; border: 0; color: var(--fg-subtle); font-size: 13px; text-decoration: underline; padding: 8px; justify-self: center; }
-.danger.armed { color: var(--red-solid); font-weight: 700; }
 
 .toast {
   position: fixed; left: 50%; transform: translateX(-50%); z-index: 20;
@@ -530,7 +528,7 @@ $("capForm").addEventListener("submit", async (e) => {
       notice("You can see the crew's leads, but your access does not let you add them.");
       toast("You cannot add leads with your access.");
     } else if (err?.code === "quota_exceeded") {
-      toast("The lead list is full. Delete old test leads first.");
+      toast("The lead list is full. Ask the page owner for help.");
     } else {
       toast("Could not save. Check your connection and tap Save again.");
     }
@@ -560,30 +558,10 @@ function openDetail(id) {
       <button class="btn ghost block" disabled><span class="material-icons">travel_explore</span>Research ${esc(l.company || "company")}</button>
       <button class="btn ghost block" disabled><span class="material-icons">send</span>Post to Slack</button>
       <div class="soon">These connect when we add the MCP server.</div>
-      ${db && canWrite ? `<button class="danger" id="delBtn" data-id="${esc(l.id)}">Delete lead</button>` : ""}
     </div>`;
   show("detail");
   $("detail").scrollTop = 0;
 }
-
-$("detailBody").addEventListener("click", async (e) => {
-  const b = e.target.closest("#delBtn");
-  if (!b) return;
-  if (!b.classList.contains("armed")) {
-    b.classList.add("armed");
-    b.textContent = "Tap again to delete for the whole crew";
-    return;
-  }
-  b.disabled = true;
-  try {
-    await db.doc("leads/" + b.dataset.id).delete();
-    show(null);
-    toast("Lead deleted");
-  } catch {
-    b.disabled = false;
-    toast("Could not delete. Try again.");
-  }
-});
 
 function show(view) {
   for (const v of ["capture", "detail"]) $(v).hidden = v !== view;
