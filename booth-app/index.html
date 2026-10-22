@@ -190,6 +190,12 @@ textarea { min-height: 96px; resize: vertical; }
 .note p { margin: 0; }
 .actions { display: grid; gap: 8px; }
 .soon { font-size: 12px; color: var(--fg-subtle); text-align: center; }
+.research { background: var(--surface); box-shadow: var(--shadow); padding: 14px; display: grid; gap: 12px; }
+.research p { margin: 0; }
+.research ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.research a { color: var(--fg); overflow-wrap: anywhere; }
+.research .src { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; }
+.research .src a { color: var(--fg-subtle); }
 
 .toast {
   position: fixed; left: 50%; transform: translateX(-50%); z-index: 20;
@@ -261,9 +267,9 @@ textarea { min-height: 96px; resize: vertical; }
           <label for="f-social">LinkedIn or socials</label>
           <div class="with-btn">
             <input id="f-social" placeholder="linkedin.com/in/…" autocomplete="off">
-            <button type="button" class="find" disabled title="Connects when we add research"><span class="material-icons">travel_explore</span>Find</button>
+            <button type="button" class="find" id="findBtn" hidden><span class="material-icons">travel_explore</span>Find</button>
           </div>
-          <span class="hint">Find searches the web once research is connected.</span>
+          <span class="hint" id="findHint">Paste a profile link, or add the company and tap Find.</span>
         </div>
       </div>
     </div>
@@ -315,7 +321,10 @@ Read the printed text and reply with only this JSON object:
 {"name": "", "title": "", "company": "", "email": "", "phone": "", "social": ""}
 Rules: use "" for anything not printed. "social" is a LinkedIn URL or a social handle, only if printed. Do not guess or invent values. The photo can be blurry or sideways.`;
 
-let db = null, user = null, sample = null, room = null;
+const SERVER = "The Booth App";
+let db = null, user = null, sample = null, room = null, mcp = null;
+let openId = null;
+let researching = false;
 let myId = null;
 let leads = [];
 let loaded = false;
@@ -378,6 +387,7 @@ async function render() {
   }
   renderTally();
   renderList();
+  if (openId && !$("detail").hidden && !researching) openDetail(openId, true);
 }
 
 function normalize(snap) {
@@ -391,7 +401,54 @@ function normalize(snap) {
     notes: str(d.notes),
     addedBy: typeof d.addedBy === "string" ? d.addedBy : null,
     createdAt: typeof d.createdAt === "number" ? d.createdAt : 0,
+    research: d.research && typeof d.research === "object" ? d.research : null,
   };
+}
+
+// Research (MCP). Tool output is untrusted: keep only known fields, as plain strings.
+function cleanBrief(payload) {
+  if (typeof payload === "string") return payload.trim() ? { summary: payload.trim().slice(0, 2000) } : null;
+  if (!payload || typeof payload !== "object") return null;
+  const s = (k, n = 500) => (typeof payload[k] === "string" ? payload[k].trim().slice(0, n) : "");
+  const list = (k, n = 5) => (Array.isArray(payload[k]) ? payload[k].filter((x) => typeof x === "string").map((x) => x.trim().slice(0, 400)).slice(0, n) : []);
+  return {
+    company: s("company"), website: s("website"), summary: s("summary", 1000), industry: s("industry"),
+    size: s("size"), headquarters: s("headquarters"), uses_salesforce: s("uses_salesforce"),
+    recent_news: list("recent_news", 3), talking_points: list("talking_points", 3),
+    person_profile_url: s("person_profile_url"), sources: list("sources", 8),
+  };
+}
+const safeUrl = (u) => (/^https?:\/\//i.test(u) ? u : "");
+const linkTo = (u, label) => {
+  const url = safeUrl(u);
+  return url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label || url)}</a>` : esc(label || u);
+};
+
+function researchError(err) {
+  switch (err?.code) {
+    case "server_not_connected": return `Add the "${SERVER}" connector in claude.ai Settings, then Connectors.`;
+    case "needs_reauth": return `Reconnect "${SERVER}" in claude.ai Settings, then Connectors.`;
+    case "selection_required": return `Pick which "${SERVER}" connector to use when Claude asks.`;
+    case "not_in_manifest": case "approval_required": case "blocked_by_policy":
+      return "Research is not allowed in this view. Allow the connector when Claude asks.";
+    case "server_unavailable": return "The research server is busy or waking up. Try again in a minute.";
+    case "upstream_error": return "Research took too long or failed. Try again.";
+    case "tool_error": return "Research failed on the server. Try again in a minute.";
+    default: return "Research is not available right now.";
+  }
+}
+
+function renderResearch(r) {
+  const facts = [["Website", r.website ? linkTo(r.website) : ""], ["Industry", esc(r.industry)], ["Size", esc(r.size)],
+    ["HQ", esc(r.headquarters)], ["Salesforce", esc(r.uses_salesforce)]].filter(([, v]) => v);
+  return `<div><div class="section-label">Company research</div><div class="research">
+    ${r.summary ? `<p>${esc(r.summary)}</p>` : ""}
+    ${facts.length ? `<dl class="kv">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>` : ""}
+    ${r.talking_points?.length ? `<div><div class="section-label">Talking points</div><ul>${r.talking_points.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>` : ""}
+    ${r.recent_news?.length ? `<div><div class="section-label">Recent news</div><ul>${r.recent_news.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>` : ""}
+    ${r.sources?.length ? `<div class="src">${r.sources.map((u, i) => linkTo(u, `Source ${i + 1}`)).join("")}</div>` : ""}
+    <div class="hint">Researched by ${esc(whoName(r.by))}${r.at ? ` at ${esc(when(r.at))}` : ""}</div>
+  </div></div>`;
 }
 
 // Crew on the floor
@@ -429,6 +486,9 @@ function openCapture() {
   $("photoHint").textContent = sample ? "Claude reads the name, title, company, and contact details." : "Photo reading is not available in this view.";
   $("photoBox").hidden = !sample;
   $("readStatus").hidden = true;
+  $("findBtn").hidden = !mcp;
+  $("findBtn").disabled = false;
+  $("findHint").textContent = mcp ? "Paste a profile link, or add the company and tap Find." : "Paste a profile link if you have one.";
   renderCaptureControls();
   show("capture");
   $("capture").scrollTop = 0;
@@ -485,6 +545,34 @@ $("photoInput").addEventListener("change", async (e) => {
   }
 });
 
+$("findBtn").addEventListener("click", async () => {
+  const company = $("f-company").value.trim();
+  if (!company) {
+    $("findHint").textContent = "Add the company first, then tap Find.";
+    return;
+  }
+  const btn = $("findBtn");
+  btn.disabled = true;
+  $("findHint").textContent = "Searching the web. This takes about a minute…";
+  try {
+    const input = { company };
+    if ($("f-name").value.trim()) input.person_name = $("f-name").value.trim();
+    if ($("f-title").value.trim()) input.person_title = $("f-title").value.trim();
+    const res = await mcp.callTool(SERVER, "research_company", input);
+    const brief = cleanBrief(res.payload);
+    if (draft && brief) draft.research = { ...brief, at: Date.now(), by: myId };
+    const url = safeUrl(brief?.person_profile_url || "");
+    if (url) $("f-social").value = url;
+    $("findHint").textContent = url
+      ? "Found a profile. Company research saves with this lead."
+      : "No profile found. Company research saves with this lead.";
+  } catch (err) {
+    $("findHint").textContent = researchError(err);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 $("capRating").addEventListener("click", (e) => {
   const b = e.target.closest("[data-r]");
   if (!b) return;
@@ -517,6 +605,7 @@ $("capForm").addEventListener("submit", async (e) => {
   try {
     const lead = { rating: draft.rating, tags: [...draft.tags], notes: v("notes"), addedBy: myId, createdAt: Date.now() };
     for (const k of FIELDS) lead[k] = v(k);
+    if (draft.research) lead.research = draft.research;
     await db.collection("leads").add(lead);
     readCtl?.abort();
     filter = null;
@@ -539,9 +628,10 @@ $("capForm").addEventListener("submit", async (e) => {
 });
 
 // Detail
-function openDetail(id) {
+function openDetail(id, keepScroll = false) {
   const l = leads.find((x) => x.id === id);
   if (!l) return;
+  openId = id;
   const rows = [["Email", l.email], ["Phone", l.phone], ["Socials", l.social]].filter(([, val]) => val);
   $("detailBody").innerHTML = `
     <div class="detail-head">
@@ -554,17 +644,57 @@ function openDetail(id) {
     ${l.tags.length ? `<div><div class="section-label">Quick tags</div><div class="chips">${l.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div></div>` : ""}
     <div><div class="section-label">Notes</div><div class="note"><p>${l.notes ? esc(l.notes) : "No notes yet."}</p></div></div>
     <div class="hint">Added by ${esc(whoName(l.addedBy))} at ${esc(when(l.createdAt))}</div>
+    ${l.research ? renderResearch(l.research) : ""}
     <div class="actions">
-      <button class="btn ghost block" disabled><span class="material-icons">travel_explore</span>Research ${esc(l.company || "company")}</button>
+      ${mcp && l.company ? `<button class="btn ghost block" id="researchBtn" data-id="${esc(l.id)}"><span class="material-icons">travel_explore</span>${l.research ? "Refresh research" : `Research ${esc(l.company)}`}</button>
+      <div class="status" id="researchStatus" hidden></div>` : ""}
       <button class="btn ghost block" disabled><span class="material-icons">send</span>Post to Slack</button>
-      <div class="soon">These connect when we add the MCP server.</div>
+      <div class="soon">Slack connects in a later step.</div>
     </div>`;
   show("detail");
-  $("detail").scrollTop = 0;
+  if (!keepScroll) $("detail").scrollTop = 0;
 }
+
+$("detailBody").addEventListener("click", async (e) => {
+  const b = e.target.closest("#researchBtn");
+  if (!b || researching) return;
+  const l = leads.find((x) => x.id === b.dataset.id);
+  if (!l) return;
+  const st = $("researchStatus");
+  researching = true;
+  b.disabled = true;
+  st.hidden = false;
+  st.innerHTML = `<span class="material-icons spin">autorenew</span>Researching ${esc(l.company)}. This takes about a minute…`;
+  try {
+    const input = { company: l.company };
+    if (l.name) input.person_name = l.name;
+    if (l.title) input.person_title = l.title;
+    const res = await mcp.callTool(SERVER, "research_company", input);
+    const brief = cleanBrief(res.payload);
+    if (!brief) throw { code: "tool_error" };
+    const research = { ...brief, at: Date.now(), by: myId };
+    const patch = { research };
+    const url = safeUrl(brief.person_profile_url);
+    if (!l.social && url) patch.social = url;
+    researching = false;
+    if (db && canWrite) {
+      await db.doc("leads/" + l.id).update(patch);
+      toast("Research saved for the crew");
+    } else {
+      Object.assign(l, patch);
+      openDetail(l.id, true);
+      toast("Research shown but not saved");
+    }
+  } catch (err) {
+    researching = false;
+    b.disabled = false;
+    st.innerHTML = `<span class="material-icons">error_outline</span>${esc(researchError(err))}`;
+  }
+});
 
 function show(view) {
   for (const v of ["capture", "detail"]) $(v).hidden = v !== view;
+  if (view !== "detail") openId = null;
   document.body.style.overflow = view ? "hidden" : "";
 }
 
@@ -595,7 +725,7 @@ document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("cli
 render();
 (async () => {
   const use = (n) => (window.claude?.use ? window.claude.use(n).catch(() => null) : Promise.resolve(null));
-  [db, user, sample, room] = await Promise.all([use("db"), use("user"), use("sample"), use("room")]);
+  [db, user, sample, room, mcp] = await Promise.all([use("db"), use("user"), use("sample"), use("room"), use("mcp")]);
 
   if (sample) {
     const lim = await sample.limits().catch(() => null);
