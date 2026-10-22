@@ -11,13 +11,16 @@ const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || process.env.MCP_PATH_TOKEN || "
 // Legacy secret path, kept while connectors move to the header. Unset MCP_PATH_TOKEN to turn it off.
 const LEGACY_PATH_TOKEN = process.env.MCP_PATH_TOKEN || "";
 
+function sameSecret(a: string, b: string): boolean {
+  const given = Buffer.from(a);
+  const expected = Buffer.from(b);
+  return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
 function authorized(req: express.Request): boolean {
   if (!AUTH_TOKEN) return true;
   const match = /^Bearer\s+(.+)$/i.exec(req.get("authorization") || "");
-  if (!match) return false;
-  const given = Buffer.from(match[1].trim());
-  const expected = Buffer.from(AUTH_TOKEN);
-  return given.length === expected.length && timingSafeEqual(given, expected);
+  return !!match && sameSecret(match[1].trim(), AUTH_TOKEN);
 }
 // Simple spend guard: at most this many research calls per hour across everyone.
 const MAX_CALLS_PER_HOUR = Number(process.env.MAX_CALLS_PER_HOUR) || 60;
@@ -96,7 +99,20 @@ app.post("/mcp", (req, res) => {
   }
   return handleMcp(req, res);
 });
-if (LEGACY_PATH_TOKEN) app.post(`/mcp/${LEGACY_PATH_TOKEN}`, handleMcp);
+// Never build a route from the token: it can hold route syntax, and route errors print it.
+app.post(/^\/mcp\/[^/]+$/, (req, res) => {
+  let given = "";
+  try {
+    given = decodeURIComponent(req.path.slice("/mcp/".length));
+  } catch {
+    given = "";
+  }
+  if (!LEGACY_PATH_TOKEN || !sameSecret(given, LEGACY_PATH_TOKEN)) {
+    res.status(404).json({ jsonrpc: "2.0", error: { code: -32001, message: "Not found." }, id: null });
+    return;
+  }
+  return handleMcp(req, res);
+});
 
 // Stateless mode has no server-sent stream or session to end.
 app.all(/^\/mcp(\/.*)?$/, (_req, res) => {
